@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>보안 대시보드</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+      background-color: #f9f9f9;
+      text-align: center;
+    }
+    .score-container {
+      padding: 20px;
+      background: #fff;
+      display: inline-block;
+      box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+      border-radius: 10px;
+      text-align: center;
+    }
+    .chart-container {
+      position: relative;
+      height: 300px;
+      width: 300px;
+      margin: auto;
+    }
+    .info {
+      margin-top: 10px;
+      font-size: 1em;
+    }
+    h1 {
+      font-size: 1.2em;
+      margin-bottom: 10px;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="score-container">
+    <h1>나의 안전 점수</h1>
+    <div class="chart-container">
+      <canvas id="safetyChart"></canvas>
+    </div>
+    <div class="info">
+      <p id="comparisonText"></p>
+      <p id="percentileText"></p>
+    </div>
+  </div>
+
+  <script>
+    let safetyChart;
+
+    // ✅ 중앙 텍스트를 표시하는 플러그인
+    const centerTextPlugin = {
+      id: 'centerText',
+      beforeDraw(chart) {
+        const { width } = chart;
+        const { ctx } = chart;
+        const text = chart.options.plugins.centerText.text || "0";
+
+        ctx.save();
+        ctx.font = "bold 40px Arial";
+        ctx.fillStyle = "#000";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(text, width / 2, chart.height / 2);
+        ctx.restore();
+      }
+    };
+
+    Chart.register(centerTextPlugin);
+
+    const ctx = document.getElementById('safetyChart').getContext('2d');
+    safetyChart = new Chart(ctx, {
+      type: 'doughnut',
+      data: {
+        datasets: [{
+          data: [0, 100],
+          backgroundColor: ['#374BBF', '#E0E0E0']
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: {
+          tooltip: {
+            callbacks: {
+              label: function(context) {
+                return context.label + ": " + context.parsed + "%";
+              }
+            }
+          },
+          centerText: {
+            text: "0"
+          }
+        },
+        cutout: '80%'
+      }
+    });
+
+    // ✅ 안전 점수 계산 함수
+    function calculateSafetyScore(leakData) {
+      const sensitivityWeights = { "낮음": 0.1, "중간": 0.3, "높음": 0.7 };
+
+      // 🔹 카테고리별 유출 개수 집계
+      let categoryCounts = {};
+      leakData.forEach(({ category, sensitivity }) => {
+        categoryCounts[category] = (categoryCounts[category] || 0) + 1;
+      });
+
+      let categories = Object.keys(categoryCounts);
+      let n_counts = Object.values(categoryCounts);
+      let w_weights = categories.map(cat => sensitivityWeights[sensitivity]);
+
+      let N = n_counts.reduce((acc, val) => acc + val, 0);
+      let w_total = 0.05 + Math.min(0.02 * N, 2);
+      let weightedSum = n_counts.reduce((sum, n, i) => sum + w_weights[i] * n, 0);
+      let logTerm = Math.log(1 + w_total * N);
+
+      let S = 100 - (weightedSum * logTerm);
+      return Math.min(100, Math.max(0, Math.floor(S)));
+    }
+
+    // ✅ 로그인된 사용자의 이메일을 동적으로 가져오는 함수
+    function getLoggedInUserEmail() {
+      const userEmail = localStorage.getItem('userEmail');
+      if (!userEmail) {
+        alert('로그인 후 이용해 주세요.');
+        window.location.href = '/login';  // 로그인 페이지로 리디렉션
+        return null;
+      }
+      return userEmail;
+    }
+
+    // ✅ 안전 점수 및 백분위 업데이트
+    async function updateSafetyData() {
+      try {
+        const userEmail = getLoggedInUserEmail();  // 로그인된 사용자의 이메일
+        if (!userEmail) return;  // 이메일이 없으면 진행하지 않음
+
+        // 1. 이전 유출 기록 가져오기 (API를 통해)
+        const previousLeaksResponse = await fetch(`/api/previous-leaks/${userEmail}`);
+        if (!previousLeaksResponse.ok) {
+          throw new Error('이전 유출 기록을 가져오는 데 실패했습니다.');
+        }
+        const previousLeaks = await previousLeaksResponse.json();
+        const previousSafetyScore = calculateSafetyScore(previousLeaks);
+
+        // 2. 현재 유출 기록 가져오기 (API를 통해)
+        const currentLeaksResponse = await fetch(`/api/user-leaks/${userEmail}`);
+        if (!currentLeaksResponse.ok) {
+          throw new Error('현재 유출 기록을 가져오는 데 실패했습니다.');
+        }
+        const currentLeaks = await currentLeaksResponse.json();
+        const currentSafetyScore = calculateSafetyScore(currentLeaks);
+
+        // 3. 점수 비교
+        let scoreDifference = currentSafetyScore - previousSafetyScore;
+        let comparisonText = scoreDifference > 0
+          ? `이전보다 ${scoreDifference}점 상승`
+          : scoreDifference < 0
+            ? `이전보다 ${Math.abs(scoreDifference)}점 감소`
+            : "이전과 동일한 점수";
+
+        // 4. UI 업데이트
+        document.getElementById('comparisonText').textContent = comparisonText;
+
+        // 5. 백분위 계산 (전체 사용자 점수 예시)
+        const allUsersResponse = await fetch('/api/all-users-leaks');
+        if (!allUsersResponse.ok) {
+          throw new Error('전체 사용자 데이터를 가져오는 데 실패했습니다.');
+        }
+        const allUsersLeakData = await allUsersResponse.json();
+        const allSafetyScores = allUsersLeakData.map(user => calculateSafetyScore(user.leaks));
+
+        const higherScores = allSafetyScores.filter(score => score > currentSafetyScore).length;
+        const percentile = (higherScores / allSafetyScores.length) * 100;
+        const percentileText = `상위 ${Math.round(percentile)}%`;
+
+        document.getElementById('percentileText').textContent = percentileText;
+        document.getElementById('percentileText').style.color = '#374BBF';
+
+        // 차트 업데이트
+        safetyChart.data.datasets[0].data = [currentSafetyScore, 100 - currentSafetyScore];
+        safetyChart.options.plugins.centerText.text = currentSafetyScore;
+        safetyChart.update();
+
+      } catch (error) {
+        console.error('데이터를 불러올 수 없습니다:', error);
+        document.getElementById('comparisonText').textContent = "데이터 로드 실패";
+        document.getElementById('percentileText').textContent = "";
+      }
+    }
+
+    // ✅ 페이지 로드 시 데이터 요청
+    updateSafetyData();
+
+    // ✅ 30초마다 데이터 갱신 (필요에 따라 간격을 조정)
+    setInterval(updateSafetyData, 30000);
+  </script>
+</body>
+</html>
+
